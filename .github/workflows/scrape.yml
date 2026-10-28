@@ -1,0 +1,51 @@
+name: Atualizar Noticias
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Roda a cada 6 horas
+  workflow_dispatch: # Permite rodar manualmente
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Instalar dependencias
+        run: pip install feedparser==6.0.11 google-generativeai==0.8.3 supabase==2.10.0
+      - name: Executar scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python -c "
+          import feedparser, os, google.generativeai as genai
+          from supabase import create_client
+
+          genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+          model = genai.GenerativeModel('gemini-1.5-flash')
+          supabase = create_client(os.getenv('SUPABASE_URL'), os.getenv('SUPABASE_KEY'))
+
+          feeds = ['http://feeds.reuters.com/reuters/topNews', 'https://feeds.bbci.co.uk/news/world/rss.xml']
+          
+          for feed_url in feeds:
+              feed = feedparser.parse(feed_url)
+              for entry in feed.entries[:5]: # Limita a 5 por feed para poupar cota gratuita
+                  prompt = f'Avalie de 1.0 a 10.0 a significância global desta notícia. Retorne APENAS o número. Eventos triviais = <3.0. Geopolítica, ciência, macroeconomia = >5.0. Título: {entry.title}'
+                  try:
+                      response = model.generate_content(prompt)
+                      score = float(response.text.strip().replace('\`', '').replace('json', ''))
+                      if score >= 4.5:
+                          supabase.table('noticias').upsert({
+                              'titulo': entry.title,
+                              'fonte': feed.feed.get('title', 'Unknown'),
+                              'url': entry.link,
+                              'score': score,
+                              'publicado_em': entry.get('published', '')
+                          }, on_conflict='url').execute()
+                  except Exception:
+                      pass
+          "
