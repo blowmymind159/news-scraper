@@ -29,7 +29,16 @@ jobs:
           model = genai.GenerativeModel('gemini-1.5-flash')
           supabase = create_client(os.getenv('SUPABASE_URL'), os.getenv('SUPABASE_KEY'))
 
-          feeds = ['http://feeds.reuters.com/reuters/topNews', 'https://feeds.bbci.co.uk/news/world/rss.xml']
+          feeds = [
+    'https://feeds.bbci.co.uk/news/world/rss.xml',
+    'https://www.theguardian.com/world/rss',
+    'https://www.aljazeera.com/xml/rss/all.xml',
+    'https://techcrunch.com/feed/',
+    'https://feeds.npr.org/1001/rss.xml',
+    'https://www.nature.com/nature.rss',
+    'https://hnrss.org/frontpage',
+    'https://feeds.arstechnica.com/arstechnica/index'
+]
           
           for feed_url in feeds:
               feed = feedparser.parse(feed_url)
