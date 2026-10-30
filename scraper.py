@@ -1,59 +1,71 @@
 import feedparser
-import re
 import os
+import time
+from datetime import datetime
+import google.generativeai as genai
 from supabase import create_client
 
-print("=== INICIANDO SCRAPER (MODO NEWS MINIMALIST RSS) ===")
+print("=== INICIANDO SCRAPER ===")
 
-# Conectar ao Supabase
+genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+model = genai.GenerativeModel('gemini-3.8-flash')
+
 supabase = create_client(os.getenv('SUPABASE_URL'), os.getenv('SUPABASE_KEY'))
 
-# O feed RSS oficial do News Minimalist (que já tem as notícias curadas e com score!)
-RSS_URL = 'https://rss.beehiiv.com/feeds/4aF2pGVAEN.xml'
+feeds = [
+    'https://feeds.bbci.co.uk/news/world/rss.xml',
+    'https://www.theguardian.com/world/rss',
+    'https://techcrunch.com/feed/',
+    'https://hnrss.org/frontpage'
+]
 
-print(f"Lendo feed: {RSS_URL}")
-feed = feedparser.parse(RSS_URL)
+print(f"\n=== PROCESSANDO {len(feeds)} FEEDS ===\n")
 
 total_inseridos = 0
+gemini_requests = 0
 
-# Regex para extrair do HTML: [Score] Título — <a href="URL"><b>Fonte</b></a>
-# Exemplo no HTML: <b>[6.3] Juries hold Meta... — </b><a ... href="https://..."><b>apnews.com</b></a>
-pattern = re.compile(r'\[(\d+\.\d+)\]\s+(.*?)\s+—\s+.*?href="(https?://[^"]+)".*?<b>([^<]+)</b>', re.IGNORECASE | re.DOTALL)
-
-for entry in feed.entries:
-    # O conteúdo HTML está geralmente em 'content' ou 'summary'
-    content = entry.get('content', [{}])[0].get('value', '')
-    if not content:
-        content = entry.get('summary', '')
-        
-    # Encontrar todas as correspondências no conteúdo HTML
-    matches = pattern.findall(content)
+for feed_url in feeds:
+    print(f"Processando: {feed_url}")
+    feed = feedparser.parse(feed_url)
     
-    for match in matches:
-        score_str, title, url, source = match
+    for entry in feed.entries[:5]:
+        title = entry.title
+        source = feed.feed.get('title', 'Unknown')
+        url = entry.link
         
-        # Limpar o título e a fonte de espaços extras ou quebras de linha
-        title = title.strip()
-        source = source.strip()
+        print(f"  Título: {title}")
+        print(f"  Fonte: {source}")
         
-        try:
-            score = float(score_str)
-        except ValueError:
-            continue
-            
-        # Só inserir se o score for relevante (ex: >= 5.0)
-        if score >= 5.0:
-            print(f"Encontrada: [{score}] {title} ({source})")
+        # Usar Gemini para score
+        if gemini_requests < 20:
+            try:
+                prompt = f'Avalie de 1.0 a 10.0 a significância global desta notícia. Retorne APENAS o número. Título: {title}'
+                response = model.generate_content(prompt)
+                score = float(response.text.strip().replace('`', '').replace('json', ''))
+                gemini_requests += 1
+                print(f"    Score Gemini: {score}")
+            except Exception as e:
+                print(f"    Erro Gemini: {e}")
+                score = 3.0
+        else:
+            score = 3.0
+            print(f"    Quota Gemini esgotada, usando score padrão")
+        
+        # Inserir no Supabase (sem publicado_em)
+        if score >= 2.0:
             try:
                 supabase.table('noticias').upsert({
                     'titulo': title,
                     'fonte': source,
                     'url': url,
-                    'score': score,
-                    'publicado_em': entry.get('published', '')
+                    'score': score
                 }, on_conflict='url').execute()
                 total_inseridos += 1
+                print(f"    ✓ Inserido")
             except Exception as e:
-                print(f"Erro ao inserir: {e}")
+                print(f"    ✗ Erro ao inserir: {e}")
+        
+        time.sleep(2)
 
 print(f"\n=== TOTAL INSERIDOS: {total_inseridos} ===")
+print(f"=== REQUESTS GEMINI: {gemini_requests}/20 ===")
