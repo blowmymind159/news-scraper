@@ -1,58 +1,68 @@
 import feedparser
+import re
 import os
 import time
-from datetime import datetime
-import google.generativeai as genai
 from supabase import create_client
 
-print("=== INICIANDO SCRAPER ===")
+print("=== INICIANDO SCRAPER (RSS NEWS MINIMALIST) ===")
 
-genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
-model = genai.GenerativeModel('gemini-3.8-flash')
+# Conectar ao Supabase
+supabase_url = os.getenv('SUPABASE_URL')
+supabase_key = os.getenv('SUPABASE_KEY')
+print(f"Supabase URL: {supabase_url}")
 
-supabase = create_client(os.getenv('SUPABASE_URL'), os.getenv('SUPABASE_KEY'))
+supabase = create_client(supabase_url, supabase_key)
 
-feeds = [
-    'https://feeds.bbci.co.uk/news/world/rss.xml',
-    'https://www.theguardian.com/world/rss',
-    'https://techcrunch.com/feed/',
-    'https://hnrss.org/frontpage'
-]
+# RSS feed oficial do News Minimalist (notícias já curadas com scores)
+RSS_URL = 'https://rss.beehiiv.com/feeds/4aF2pGVAEN.xml'
 
-print(f"\n=== PROCESSANDO {len(feeds)} FEEDS ===\n")
+print(f"\nLendo feed: {RSS_URL}")
+feed = feedparser.parse(RSS_URL)
+print(f"Encontradas {len(feed.entries)} edições\n")
 
 total_inseridos = 0
-gemini_requests = 0
+total_ignorados = 0
 
-for feed_url in feeds:
-    print(f"Processando: {feed_url}")
-    feed = feedparser.parse(feed_url)
+# Regex para extrair notícias do HTML do RSS
+# Formato principal: <b>[SCORE] Título — </b><a href="URL"><b>fonte</b></a>
+pattern_main = re.compile(
+    r'<b>\[(\d+\.\d+)\]\s+(.*?)\s+—\s+</b><a\s+href="([^"]+)"[^>]*><b>([^<]+)</b></a>',
+    re.IGNORECASE | re.DOTALL
+)
+
+# Formato secundário (Highly covered news): [SCORE] Título — <a href="URL">fonte</a>
+pattern_secondary = re.compile(
+    r'\[(\d+\.\d+)\]\s+(.*?)\s+—\s+<a\s+href="([^"]+)"[^>]*>([^<]+)</a>',
+    re.IGNORECASE | re.DOTALL
+)
+
+for entry in feed.entries:
+    # Obter o conteúdo HTML
+    content = entry.get('content', [{}])[0].get('value', '')
+    if not content:
+        content = entry.get('summary', '')
     
-    for entry in feed.entries[:5]:
-        title = entry.title
-        source = feed.feed.get('title', 'Unknown')
-        url = entry.link
+    # Obter data de publicação
+    pub_date = entry.get('published', '')
+    
+    print(f"Edição: {entry.title}")
+    print(f"Publicada: {pub_date}")
+    
+    # Extrair notícias com o padrão principal
+    matches_main = pattern_main.findall(content)
+    for match in matches_main:
+        score_str, title, url, source = match
+        title = title.strip()
+        source = source.strip()
         
-        print(f"  Título: {title}")
-        print(f"  Fonte: {source}")
+        try:
+            score = float(score_str)
+        except ValueError:
+            continue
         
-        # Usar Gemini para score
-        if gemini_requests < 20:
-            try:
-                prompt = f'Avalie de 1.0 a 10.0 a significância global desta notícia. Retorne APENAS o número. Título: {title}'
-                response = model.generate_content(prompt)
-                score = float(response.text.strip().replace('`', '').replace('json', ''))
-                gemini_requests += 1
-                print(f"    Score Gemini: {score}")
-            except Exception as e:
-                print(f"    Erro Gemini: {e}")
-                score = 3.0
-        else:
-            score = 3.0
-            print(f"    Quota Gemini esgotada, usando score padrão")
-        
-        # Inserir no Supabase (sem publicado_em)
-        if score >= 2.0:
+        # Só inserir notícias com score >= 5.5 (alta significância)
+        if score >= 5.5:
+            print(f"  ✓ [{score}] {title[:60]}... ({source})")
             try:
                 supabase.table('noticias').upsert({
                     'titulo': title,
@@ -61,11 +71,41 @@ for feed_url in feeds:
                     'score': score
                 }, on_conflict='url').execute()
                 total_inseridos += 1
-                print(f"    ✓ Inserido")
             except Exception as e:
                 print(f"    ✗ Erro ao inserir: {e}")
+        else:
+            total_ignorados += 1
+    
+    # Extrair notícias com o padrão secundário
+    matches_secondary = pattern_secondary.findall(content)
+    for match in matches_secondary:
+        score_str, title, url, source = match
+        title = title.strip()
+        source = source.strip()
         
-        time.sleep(2)
+        try:
+            score = float(score_str)
+        except ValueError:
+            continue
+        
+        if score >= 5.5:
+            print(f"  ✓ [{score}] {title[:60]}... ({source})")
+            try:
+                supabase.table('noticias').upsert({
+                    'titulo': title,
+                    'fonte': source,
+                    'url': url,
+                    'score': score
+                }, on_conflict='url').execute()
+                total_inseridos += 1
+            except Exception as e:
+                print(f"    ✗ Erro ao inserir: {e}")
+        else:
+            total_ignorados += 1
+    
+    print()  # Linha em branco entre edições
 
-print(f"\n=== TOTAL INSERIDOS: {total_inseridos} ===")
-print(f"=== REQUESTS GEMINI: {gemini_requests}/20 ===")
+print(f"\n=== RESUMO ===")
+print(f"Total inseridas: {total_inseridos}")
+print(f"Total ignoradas (score < 5.5): {total_ignorados}")
+print(f"=== FIM ===")
